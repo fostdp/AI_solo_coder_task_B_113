@@ -1,0 +1,68 @@
+global:
+  scrape_interval: 15s
+  evaluation_interval: 15s
+  scrape_timeout: 10s
+
+  external_labels:
+    monitor: 'field-hospital-monitor'
+    environment: 'production'
+
+alerting:
+  alertmanagers:
+    - static_configs:
+        - targets:
+            - alertmanager:9093
+
+rule_files:
+  - "rules/*.yml"
+
+scrape_configs:
+  - job_name: 'prometheus'
+    static_configs:
+      - targets: ['localhost:9090']
+
+  - job_name: 'field-hospital-backend'
+    metrics_path: '/metrics'
+    static_configs:
+      - targets: ['backend:6060']
+        labels:
+          service: 'backend'
+          component: 'api'
+    scrape_interval: 5s
+    scrape_timeout: 5s
+
+  - job_name: 'emqx'
+    metrics_path: '/api/v5/prometheus/auth'
+    static_configs:
+      - targets: ['emqx:18083']
+        labels:
+          service: 'mqtt'
+          component: 'broker'
+    basic_auth:
+      username: 'admin'
+      password: 'public'
+    scrape_interval: 15s
+
+  - job_name: 'timescaledb'
+    static_configs:
+      - targets: ['timescaledb:9187']
+        labels:
+          service: 'database'
+          component: 'timescaledb'
+    scrape_interval: 15s
+
+  - job_name: 'node-exporter'
+    static_configs:
+      - targets: ['node-exporter:9100']
+        labels:
+          service: 'infra'
+          component: 'node'
+    scrape_interval: 15s
+
+  - job_name: 'cadvisor'
+    static_configs:
+      - targets: ['cadvisor:8080']
+        labels:
+          service: 'infra'
+          component: 'containers'
+    scrape_interval: 15s
