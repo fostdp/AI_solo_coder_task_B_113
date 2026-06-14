@@ -101,6 +101,22 @@ services:
     networks:
       - field-hospital-net
 
+  gnn-service:
+    build: ./gnn-service
+    container_name: field-hospital-gnn
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8000/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
   backend:
     build:
       context: ./backend
@@ -117,6 +133,11 @@ services:
       DB_SSLMODE: disable
       MQTT_BROKER: tcp://emqx:1883
       MQTT_CLIENTID: field-hospital-backend-docker
+      GNN_ENABLED: "true"
+      GNN_PYTHONSERVICEURL: http://gnn-service:8000
+      COX_VAP_ENABLED: "true"
+      OPTIMIZER_ENABLED: "true"
+      TRANSPORT_ENABLED: "true"
     ports:
       - "8080:8080"
       - "6060:6060"
@@ -124,6 +145,8 @@ services:
       timescaledb:
         condition: service_healthy
       emqx:
+        condition: service_healthy
+      gnn-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/api/beds || exit 1"]
