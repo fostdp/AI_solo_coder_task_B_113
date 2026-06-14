@@ -1,12 +1,14 @@
 package main
 
 import (
+	"bytes"
 	"encoding/json"
 	"flag"
 	"fmt"
 	"log"
 	"math"
 	"math/rand"
+	"net/http"
 	"os"
 	"os/signal"
 	"syscall"
@@ -14,6 +16,21 @@ import (
 
 	mqtt "github.com/eclipse/paho.mqtt.golang"
 )
+
+type CultureResult struct {
+	BedID        int       `json:"bed_id"`
+	BacteriaType string    `json:"bacteria_type"`
+	Resistance   []string  `json:"resistance"`
+	CollectedAt  time.Time `json:"collected_at"`
+}
+
+type TransportRequest struct {
+	FromBed     int     `json:"from_bed"`
+	ToBed       string  `json:"to_bed"`
+	Distance    float64 `json:"distance"`
+	Priority    string  `json:"priority"`
+	IsEmergency bool    `json:"is_emergency"`
+}
 
 type SensorMessage struct {
 	BedID      int     `json:"bed_id"`
@@ -77,11 +94,23 @@ func main() {
 		sepsisTriggerChance = 0
 	}
 
+	httpClient := &http.Client{Timeout: 5 * time.Second}
+	backendURL := "http://backend:8080"
+	if os.Getenv("BACKEND_URL") != "" {
+		backendURL = os.Getenv("BACKEND_URL")
+	}
+	lastCultureCheck := make(map[int]time.Time)
+	lastTransportCheck := time.Now()
+	cultureCount := 0
+	transportCount := 0
+
 	log.Println("=== 战地医院ICU传感器模拟器启动 ===")
 	log.Printf("Broker: %s", *broker)
-	log.Printf("床位: %d, 传感器: %d", *numBeds, *numBeds*4)
+	log.Printf("Backend API: %s", backendURL)
+	log.Printf("床位: %d, 传感器: %d", *numBeds, *numBeds*len(sensors))
 	log.Printf("上报间隔: %dms", *interval)
 	log.Printf("脓毒症模式: %s (触发概率: %.4f/事件持续: %ds)", sepsisMode, sepsisTriggerChance, *sepsisDuration)
+	log.Println("高级仿真已启用: ventilator_advanced(peak_pressure/tidal_volume/oral_secretion) + 细菌培养 + 转运请求")
 
 	sensors := []SensorConfig{
 		{
@@ -127,6 +156,39 @@ func main() {
 			MaxRange:      41,
 			Unit:          "°C",
 			AnomalyChance: 0.02,
+		},
+		{
+			Type:          "peak_pressure",
+			Name:          "气道峰压",
+			BaseValue:     25,
+			MinNormal:     15,
+			MaxNormal:     30,
+			MinRange:      10,
+			MaxRange:      60,
+			Unit:          "cmH2O",
+			AnomalyChance: 0.04,
+		},
+		{
+			Type:          "tidal_volume",
+			Name:          "潮气量",
+			BaseValue:     450,
+			MinNormal:     300,
+			MaxNormal:     600,
+			MinRange:      150,
+			MaxRange:      900,
+			Unit:          "mL",
+			AnomalyChance: 0.03,
+		},
+		{
+			Type:          "oral_secretion",
+			Name:          "口腔分泌物量",
+			BaseValue:     2,
+			MinNormal:     1,
+			MaxNormal:     3,
+			MinRange:      0,
+			MaxRange:      10,
+			Unit:          "score",
+			AnomalyChance: 0.06,
 		},
 	}
 
@@ -276,13 +338,124 @@ func main() {
 					token.WaitTimeout(100 * time.Millisecond)
 					totalSent++
 				}
+
+				lastCheck, ok := lastCultureCheck[bedID]
+				if !ok || t.Sub(lastCheck) >= 3600*time.Second {
+					lastCultureCheck[bedID] = t
+					if rand.Float64() < 0.01 {
+						cultureCount++
+						go submitCultureResult(httpClient, backendURL, bedID, t, cultureCount)
+					}
+				}
+			}
+
+			if t.Sub(lastTransportCheck) >= 600*time.Second {
+				lastTransportCheck = t
+				if rand.Float64() < 0.05 {
+					transportCount++
+					fromBed := rand.Intn(*numBeds) + 1
+					go submitTransportRequest(httpClient, backendURL, fromBed, *numBeds, t, transportCount)
+				}
 			}
 
 			if count%10 == 0 {
-				log.Printf("已发送 %d 条消息 (总 %d, 活跃脓毒症: %d/%d)",
-					totalSent, count**numBeds*len(sensors), activeSepsisCount, *numBeds)
+				log.Printf("已发送 %d 条消息 (总 %d, 活跃脓毒症: %d/%d, 培养报告: %d, 转运请求: %d)",
+					totalSent, count**numBeds*len(sensors), activeSepsisCount, *numBeds, cultureCount, transportCount)
 			}
 		}
+	}
+}
+
+func submitCultureResult(client *http.Client, baseURL string, bedID int, t time.Time, seq int) {
+	bacteriaTypes := []string{"Klebsiella_pneumoniae", "E_coli", "Pseudomonas_aeruginosa", "Staphylococcus_aureus", "Acinetobacter_baumannii"}
+	resistanceMap := map[string][]string{
+		"Klebsiella_pneumoniae":  {"CRE", "ESBL", "Ciprofloxacin"},
+		"E_coli":                 {"ESBL", "AmpC", "Cotrimoxazole"},
+		"Pseudomonas_aeruginosa": {"Carbapenem", "Ceftazidime", "Amikacin"},
+		"Staphylococcus_aureus":  {"MRSA", "Vancomycin", "Daptomycin"},
+		"Acinetobacter_baumannii": {"Carbapenem", "Colistin", "Sulbactam"},
+	}
+
+	bType := bacteriaTypes[rand.Intn(len(bacteriaTypes))]
+	allResist := resistanceMap[bType]
+	n := rand.Intn(len(allResist)) + 1
+	resistance := make([]string, n)
+	perm := rand.Perm(len(allResist))
+	for i := 0; i < n; i++ {
+		resistance[i] = allResist[perm[i]]
+	}
+
+	result := CultureResult{
+		BedID:        bedID,
+		BacteriaType: bType,
+		Resistance:   resistance,
+		CollectedAt:  t,
+	}
+	payload, _ := json.Marshal(result)
+
+	url := fmt.Sprintf("%s/api/beds/%d/culture", baseURL, bedID)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	if err != nil {
+		log.Printf("[细菌培养#%d] 创建请求失败 床位%d: %v", seq, bedID, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[细菌培养#%d] 提交失败 床位%d (%s): %v", seq, bedID, bType, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("[细菌培养#%d] 床位%d: %s 阳性, 耐药: %v (HTTP %d)", seq, bedID, bType, resistance, resp.StatusCode)
+	} else {
+		log.Printf("[细菌培养#%d] 提交异常 床位%d (HTTP %d)", seq, bedID, resp.StatusCode)
+	}
+}
+
+func submitTransportRequest(client *http.Client, baseURL string, fromBed int, numBeds int, t time.Time, seq int) {
+	priorities := []string{"low", "medium", "high"}
+	toOptions := []string{
+		fmt.Sprintf("ICU-%03d", rand.Intn(numBeds)+1),
+		"手术室",
+		"CT室",
+		"MRI室",
+		"DSA介入室",
+		"普通病房",
+		"肾内科透析室",
+	}
+
+	reqBody := TransportRequest{
+		FromBed:     fromBed,
+		ToBed:       toOptions[rand.Intn(len(toOptions))],
+		Distance:    50 + rand.Float64()*500,
+		Priority:    priorities[rand.Intn(len(priorities))],
+		IsEmergency: rand.Float64() < 0.15,
+	}
+	payload, _ := json.Marshal(reqBody)
+
+	url := fmt.Sprintf("%s/api/transport/evaluate", baseURL)
+	req, err := http.NewRequest("POST", url, bytes.NewBuffer(payload))
+	if err != nil {
+		log.Printf("[转运#%d] 创建请求失败 床位%d: %v", seq, fromBed, err)
+		return
+	}
+	req.Header.Set("Content-Type", "application/json")
+
+	resp, err := client.Do(req)
+	if err != nil {
+		log.Printf("[转运#%d] 提交失败 床位%d->%s: %v", seq, fromBed, reqBody.ToBed, err)
+		return
+	}
+	defer resp.Body.Close()
+
+	if resp.StatusCode >= 200 && resp.StatusCode < 300 {
+		log.Printf("[转运#%d] 评估完成 ICU-%03d -> %s, 距离%.0fm, 优先级:%s, 紧急:%v (HTTP %d)",
+			seq, fromBed, reqBody.ToBed, reqBody.Distance, reqBody.Priority, reqBody.IsEmergency, resp.StatusCode)
+	} else {
+		log.Printf("[转运#%d] 评估异常 床位%d (HTTP %d)", seq, fromBed, resp.StatusCode)
 	}
 }
 
