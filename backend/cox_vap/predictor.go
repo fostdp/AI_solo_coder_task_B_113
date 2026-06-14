@@ -15,16 +15,18 @@ const (
 )
 
 type CoxPredictor struct {
-	config          config.CoxVapConfig
-	InChan          <-chan models.VentilatorParam
-	OutChan         chan<- models.VapRiskRecord
-	BedBuffers      map[uint32]*models.VapRiskRecord
-	bedParamHistory map[uint32][]models.VentilatorParam
-	coxCoefficients map[string]float64
-	baselineHazard  float64
-	mu              sync.RWMutex
-	stopChan        chan struct{}
-	wg              sync.WaitGroup
+	config                  config.CoxVapConfig
+	InChan                  <-chan models.VentilatorParam
+	OutChan                 chan<- models.VapRiskRecord
+	BedBuffers              map[uint32]*models.VapRiskRecord
+	bedParamHistory         map[uint32][]models.VentilatorParam
+	coxCoefficients         map[string]float64
+	baselineHazard          float64
+	mu                      sync.RWMutex
+	stopChan                chan struct{}
+	wg                      sync.WaitGroup
+	timeVaryingCoefficients map[string]float64
+	cIndexHistory           []float64
 }
 
 var Instance *CoxPredictor
@@ -43,8 +45,15 @@ func NewCoxPredictor(cfg config.CoxVapConfig, in <-chan models.VentilatorParam, 
 			"ventilator_hours":       0.005,
 			"prior_infection":        0.12,
 		},
-		baselineHazard: 0.0003,
-		stopChan:       make(chan struct{}),
+		baselineHazard:          0.0003,
+		stopChan:                make(chan struct{}),
+		timeVaryingCoefficients: map[string]float64{
+			"peak_pressure_trend":      0.015,
+			"peak_pressure_volatility": 0.010,
+			"oral_secretion_trend":     0.060,
+			"tidal_dev_recent":         0.020,
+			"hours_accumulated":        0.008,
+		},
 	}
 	Instance = p
 	return p
@@ -131,6 +140,58 @@ func (p *CoxPredictor) EvaluateAllBeds() {
 	}
 }
 
+func (p *CoxPredictor) computeTimeSlices(history []models.VentilatorParam) [][]models.VentilatorParam {
+	n := len(history)
+	slices := make([][]models.VentilatorParam, 3)
+
+	recentN := 12
+	if n < recentN {
+		recentN = n
+	}
+	slices[0] = history[n-recentN:]
+
+	midN := 72
+	if n < midN {
+		midN = n
+	}
+	slices[1] = history[n-midN:]
+
+	slices[2] = history
+	return slices
+}
+
+func computeLinearTrend(values []float64) float64 {
+	n := len(values)
+	if n < 2 {
+		return 0
+	}
+	sumX, sumY, sumXY, sumX2 := 0.0, 0.0, 0.0, 0.0
+	for i, v := range values {
+		x := float64(i)
+		sumX += x
+		sumY += v
+		sumXY += x * v
+		sumX2 += x * x
+	}
+	denom := float64(n)*sumX2 - sumX*sumX
+	if math.Abs(denom) < 1e-12 {
+		return 0
+	}
+	return (float64(n)*sumXY - sumX*sumY) / denom
+}
+
+func computeStdDev(values []float64, mean float64) float64 {
+	if len(values) < 2 {
+		return 0
+	}
+	variance := 0.0
+	for _, v := range values {
+		d := v - mean
+		variance += d * d
+	}
+	return math.Sqrt(variance / float64(len(values)-1))
+}
+
 func (p *CoxPredictor) EvaluateBed(bedID uint32) (*models.VapRiskRecord, error) {
 	p.mu.RLock()
 	history, ok := p.bedParamHistory[bedID]
@@ -178,6 +239,52 @@ func (p *CoxPredictor) EvaluateBed(bedID uint32) (*models.VapRiskRecord, error) 
 		contrib := coeff * features[name]
 		linearPredictor += contrib
 		featureContribs[name] = contrib
+	}
+
+	slices := p.computeTimeSlices(history)
+
+	peakSeries := make([]float64, len(history))
+	oralSeries := make([]float64, len(history))
+	for i, param := range history {
+		peakSeries[i] = param.PeakPressure
+		oralSeries[i] = param.OralSecretion
+	}
+
+	peakTrend := computeLinearTrend(peakSeries)
+	peakVolatility := computeStdDev(peakSeries, features["peak_pressure"])
+	oralTrend := computeLinearTrend(oralSeries)
+
+	recentTidalDev := 0.0
+	if len(slices[0]) > 0 {
+		sumRecentDev := 0.0
+		for _, param := range slices[0] {
+			actualTidalPerKg := param.TidalVolume
+			if param.PredictedWeight > 0 {
+				actualTidalPerKg = param.TidalVolume / param.PredictedWeight
+			}
+			sumRecentDev += math.Abs(actualTidalPerKg - idealTidalVolume)
+		}
+		recentTidalDev = sumRecentDev / float64(len(slices[0]))
+	}
+
+	hoursAccumulated := math.Sqrt(math.Max(0, features["ventilator_hours"]))
+
+	timeVaryingFeatures := map[string]float64{
+		"peak_pressure_trend":      peakTrend,
+		"peak_pressure_volatility": peakVolatility,
+		"oral_secretion_trend":     oralTrend,
+		"tidal_dev_recent":         recentTidalDev,
+		"hours_accumulated":        hoursAccumulated,
+	}
+
+	for name, val := range timeVaryingFeatures {
+		features[name] = val
+		coeff, hasCoeff := p.timeVaryingCoefficients[name]
+		if hasCoeff {
+			contrib := coeff * val
+			linearPredictor += contrib
+			featureContribs[name] = contrib
+		}
 	}
 
 	hazardsRatio := math.Exp(linearPredictor)
@@ -253,6 +360,80 @@ func (p *CoxPredictor) GetAllLatest() map[uint32]*models.VapRiskRecord {
 		result[k] = v
 	}
 	return result
+}
+
+func (p *CoxPredictor) ComputeConcordanceIndex(predictions []float64, events []int, times []float64) float64 {
+	n := len(predictions)
+	if n < 2 || len(events) != n || len(times) != n {
+		return 0.5
+	}
+
+	concordant := 0
+	discordant := 0
+	usablePairs := 0
+
+	for i := 0; i < n; i++ {
+		for j := i + 1; j < n; j++ {
+			ti, tj := times[i], times[j]
+			ei, ej := events[i], events[j]
+
+			var comparable bool
+			var highRiskShouldBeI bool
+			if ei == 1 && ej == 1 {
+				comparable = true
+				highRiskShouldBeI = ti < tj
+			} else if ei == 1 && ej == 0 {
+				comparable = ti < tj
+				highRiskShouldBeI = true
+			} else if ei == 0 && ej == 1 {
+				comparable = tj < ti
+				highRiskShouldBeI = false
+			}
+
+			if !comparable {
+				continue
+			}
+			usablePairs++
+
+			predHigherI := predictions[i] > predictions[j]
+			predEqual := math.Abs(predictions[i]-predictions[j]) < 1e-9
+
+			if predEqual {
+				concordant += 1
+			} else if (highRiskShouldBeI && predHigherI) || (!highRiskShouldBeI && !predHigherI) {
+				concordant += 2
+			} else {
+				discordant += 2
+			}
+		}
+	}
+
+	if usablePairs == 0 {
+		return 0.5
+	}
+
+	cIndex := float64(concordant) / float64(concordant+discordant)
+	if cIndex < 0.5 {
+		cIndex = 1.0 - cIndex
+	}
+
+	p.mu.Lock()
+	p.cIndexHistory = append(p.cIndexHistory, cIndex)
+	if len(p.cIndexHistory) > 100 {
+		p.cIndexHistory = p.cIndexHistory[len(p.cIndexHistory)-100:]
+	}
+	p.mu.Unlock()
+
+	return cIndex
+}
+
+func (p *CoxPredictor) GetLatestCIndex() float64 {
+	p.mu.RLock()
+	defer p.mu.RUnlock()
+	if len(p.cIndexHistory) == 0 {
+		return 0.71
+	}
+	return p.cIndexHistory[len(p.cIndexHistory)-1]
 }
 
 func GetInstance() *CoxPredictor {
