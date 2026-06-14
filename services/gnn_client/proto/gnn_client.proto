@@ -1,0 +1,57 @@
+syntax = "proto3";
+package gnn_client;
+option go_package = "gnn_client/proto";
+
+service GnnClientService {
+    rpc PredictSpread (PredictSpreadRequest) returns (PredictSpreadResponse);
+    rpc PredictSpreadStream (stream PredictSpreadRequest) returns (stream PredictSpreadResponse);
+    rpc UpdateCultureResult (CultureRequest) returns (AckResponse);
+    rpc GetLatencyStats (StatsRequest) returns (LatencyResponse);
+}
+
+message BedLocation {
+    uint32 bed_id = 1;
+    double location_x = 2;
+    double location_y = 3;
+}
+
+message CultureRequest {
+    uint32 bed_id = 1;
+    string bacteria_name = 2;
+    string result = 3;
+    int64 collected_at_unix = 4;
+    int64 reported_at_unix = 5;
+}
+
+message PredictSpreadRequest {
+    uint32 source_bed = 1;
+    string bacteria_name = 2;
+    repeated BedLocation beds = 3;
+    int64 timeout_ms = 4;
+}
+
+message PredictSpreadResponse {
+    uint32 source_bed = 1;
+    string bacteria_name = 2;
+    double spread_prob = 3;
+    repeated uint32 spread_path = 4;
+    repeated double edge_weights = 5;
+    bool is_fallback = 6;
+    int64 latency_ms = 7;
+    bool success = 8;
+    string error = 9;
+}
+
+message StatsRequest {}
+message LatencyResponse {
+    int64 count = 1;
+    int64 p50_ms = 2;
+    int64 p95_ms = 3;
+    int64 p99_ms = 4;
+    int32 pending_count = 5;
+}
+
+message AckResponse {
+    bool success = 1;
+    string message = 2;
+}
