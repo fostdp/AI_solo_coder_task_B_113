@@ -267,6 +267,14 @@ func (p *Predictor) randomForestPredict(features []float64, treeSet int) float64
 	return median
 }
 
+func (p *Predictor) GetInfectionRisk(bedID uint32) float64 {
+	pred := p.PredictAll()
+	if ip, ok := pred[int(bedID)]; ok {
+		return ip.MaxRisk
+	}
+	return 0.0
+}
+
 func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
 }
