@@ -11,6 +11,10 @@ type Config struct {
 	MQTT        MQTTConfig
 	Alert       AlertConfig
 	ML          MLConfig
+	CoxVap      CoxVapConfig
+	GNN         GNNConfig
+	Optimizer   OptimizerConfig
+	Transport   TransportConfig
 	BatchWriter BatchWriterConfig
 }
 
@@ -103,6 +107,34 @@ type NormalizationConfig struct {
 	TemperatureStd   float64
 }
 
+type CoxVapConfig struct {
+	Enabled           bool
+	UpdateIntervalSec int
+	ModelWeights      []float64
+	RiskThreshold     float64
+}
+
+type GNNConfig struct {
+	Enabled           bool
+	PythonServiceURL  string
+	UpdateIntervalSec int
+	MaxNodes          int
+}
+
+type OptimizerConfig struct {
+	Enabled             bool
+	SolveIntervalSec    int
+	NegativePressureBeds int
+	NursesPerShift      int
+	ObjectiveWeight     map[string]float64
+}
+
+type TransportConfig struct {
+	Enabled        bool
+	ForestTrees    int
+	ScoreThreshold int
+}
+
 type BatchWriterConfig struct {
 	BatchSize      int
 	FlushIntervalMs int
@@ -183,6 +215,24 @@ func LoadConfig() {
 	viper.SetDefault("batchwriter.batchsize", 500)
 	viper.SetDefault("batchwriter.flushintervalms", 100)
 	viper.SetDefault("batchwriter.queuesize", 50000)
+
+	viper.SetDefault("coxvap.enabled", false)
+	viper.SetDefault("coxvap.updateintervalsec", 21600)
+	viper.SetDefault("coxvap.riskthreshold", 0.5)
+
+	viper.SetDefault("gnn.enabled", false)
+	viper.SetDefault("gnn.pythonserviceurl", "http://gnn-service:8000")
+	viper.SetDefault("gnn.updateintervalsec", 3600)
+	viper.SetDefault("gnn.maxnodes", 100)
+
+	viper.SetDefault("optimizer.enabled", false)
+	viper.SetDefault("optimizer.solveintervalsec", 7200)
+	viper.SetDefault("optimizer.negativepressurebeds", 10)
+	viper.SetDefault("optimizer.nursespershift", 8)
+
+	viper.SetDefault("transport.enabled", false)
+	viper.SetDefault("transport.foresttrees", 150)
+	viper.SetDefault("transport.scorethreshold", 60)
 
 	if err := viper.ReadInConfig(); err != nil {
 		log.Printf("Warning: Config file not found, using defaults: %v", err)
