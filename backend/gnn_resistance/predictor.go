@@ -26,6 +26,18 @@ type GNNSpreadPredictor struct {
 	stopChan      chan struct{}
 	wg            sync.WaitGroup
 	Instance      *GNNSpreadPredictor
+	asyncTimeoutMs   int64
+	latencyHistory   []int64
+	latencyMu        sync.RWMutex
+	pendingRequests  map[string]*pendingReq
+	pendingMu        sync.RWMutex
+}
+
+type pendingReq struct {
+	sourceBed    uint32
+	bacteriaName string
+	startTime    time.Time
+	resultChan   chan *models.ResistancePrediction
 }
 
 var Instance *GNNSpreadPredictor
@@ -56,12 +68,15 @@ func NewGNNSpreadPredictor(cfg config.GNNConfig) *GNNSpreadPredictor {
 
 	p := &GNNSpreadPredictor{
 		config:        cfg,
-		httpClient:    &http.Client{Timeout: 10 * time.Second},
+		httpClient:    &http.Client{Timeout: 2 * time.Second},
 		BedCulture:    make(map[uint32][]models.CultureResult),
 		BedPrediction: make(map[uint32]*models.ResistancePrediction),
 		GraphAdjacency: make([][]float64, numBeds),
 		NodeFeatures:   make([][]float64, numBeds),
 		stopChan:      make(chan struct{}),
+		asyncTimeoutMs: 2000,
+		latencyHistory: make([]int64, 0, 1000),
+		pendingRequests: make(map[string]*pendingReq),
 	}
 
 	for i := 0; i < numBeds; i++ {
@@ -256,13 +271,30 @@ func (p *GNNSpreadPredictor) PredictAllSpread() {
 	}
 	p.mu.RUnlock()
 
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, 5)
+
 	for _, bedID := range bedsWithCulture {
 		bacteriaName := bacteriaMap[bedID]
 		if bacteriaName == "" {
 			bacteriaName = "Unknown"
 		}
-		_, _ = p.PredictSpread(bedID, bacteriaName)
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(bed uint32, bact string) {
+			defer wg.Done()
+			defer func() { <-sem }()
+			resultChan := p.PredictSpreadAsync(bed, bact)
+			pred := p.WaitForPrediction(resultChan, bed, bact, p.asyncTimeoutMs)
+			if pred != nil {
+				p.cachePrediction(pred)
+			}
+		}(bedID, bacteriaName)
 	}
+
+	go func() {
+		wg.Wait()
+	}()
 }
 
 func (p *GNNSpreadPredictor) PredictSpread(sourceBed uint32, bacteriaName string) (*models.ResistancePrediction, error) {
@@ -345,6 +377,163 @@ func (p *GNNSpreadPredictor) PredictSpread(sourceBed uint32, bacteriaName string
 
 	p.cachePrediction(prediction)
 	return prediction, nil
+}
+
+func (p *GNNSpreadPredictor) PredictSpreadAsync(sourceBed uint32, bacteriaName string) <-chan *models.ResistancePrediction {
+	resultChan := make(chan *models.ResistancePrediction, 1)
+	reqKey := fmt.Sprintf("%d-%s-%d", sourceBed, bacteriaName, time.Now().UnixNano())
+
+	req := &pendingReq{
+		sourceBed:    sourceBed,
+		bacteriaName: bacteriaName,
+		startTime:    time.Now(),
+		resultChan:   resultChan,
+	}
+
+	p.pendingMu.Lock()
+	p.pendingRequests[reqKey] = req
+	p.pendingMu.Unlock()
+
+	go func() {
+		defer func() {
+			p.pendingMu.Lock()
+			delete(p.pendingRequests, reqKey)
+			p.pendingMu.Unlock()
+			close(resultChan)
+		}()
+
+		pred, err := p.PredictSpread(sourceBed, bacteriaName)
+		latency := time.Since(req.startTime).Milliseconds()
+		p.recordLatency(latency)
+
+		if err != nil || pred == nil {
+			fallback := p.FallbackPrediction(sourceBed, bacteriaName)
+			fallback.IsFallback = true
+			select {
+			case resultChan <- fallback:
+			default:
+			}
+			return
+		}
+
+		select {
+		case resultChan <- pred:
+		default:
+		}
+	}()
+
+	return resultChan
+}
+
+func (p *GNNSpreadPredictor) WaitForPrediction(
+	resultChan <-chan *models.ResistancePrediction,
+	sourceBed uint32,
+	bacteriaName string,
+	timeoutMs int64,
+) *models.ResistancePrediction {
+	if timeoutMs <= 0 {
+		timeoutMs = p.asyncTimeoutMs
+	}
+
+	select {
+	case pred, ok := <-resultChan:
+		if ok && pred != nil {
+			return pred
+		}
+		fallback := p.FallbackPrediction(sourceBed, bacteriaName)
+		fallback.IsFallback = true
+		return fallback
+	case <-time.After(time.Duration(timeoutMs) * time.Millisecond):
+		fallback := p.FallbackPrediction(sourceBed, bacteriaName)
+		fallback.IsFallback = true
+		p.recordLatency(timeoutMs)
+		return fallback
+	}
+}
+
+func (p *GNNSpreadPredictor) PredictSpreadAsyncWithFallback(
+	sourceBed uint32,
+	bacteriaName string,
+) *models.ResistancePrediction {
+	resultChan := p.PredictSpreadAsync(sourceBed, bacteriaName)
+	return p.WaitForPrediction(resultChan, sourceBed, bacteriaName, p.asyncTimeoutMs)
+}
+
+func (p *GNNSpreadPredictor) recordLatency(latencyMs int64) {
+	p.latencyMu.Lock()
+	defer p.latencyMu.Unlock()
+	p.latencyHistory = append(p.latencyHistory, latencyMs)
+	if len(p.latencyHistory) > 1000 {
+		p.latencyHistory = p.latencyHistory[len(p.latencyHistory)-1000:]
+	}
+}
+
+func (p *GNNSpreadPredictor) GetP99Latency() int64 {
+	p.latencyMu.RLock()
+	defer p.latencyMu.RUnlock()
+
+	n := len(p.latencyHistory)
+	if n == 0 {
+		return 3000
+	}
+
+	sorted := make([]int64, n)
+	copy(sorted, p.latencyHistory)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
+
+	p99Idx := int(math.Ceil(0.99*float64(n))) - 1
+	if p99Idx < 0 {
+		p99Idx = 0
+	}
+	return sorted[p99Idx]
+}
+
+func (p *GNNSpreadPredictor) GetLatencyStats() map[string]int64 {
+	p.latencyMu.RLock()
+	defer p.latencyMu.RUnlock()
+
+	n := len(p.latencyHistory)
+	stats := map[string]int64{
+		"count": int64(n),
+		"p50":   0,
+		"p95":   0,
+		"p99":   0,
+	}
+	if n == 0 {
+		return stats
+	}
+
+	sorted := make([]int64, n)
+	copy(sorted, p.latencyHistory)
+	sort.Slice(sorted, func(i, j int) bool {
+		return sorted[i] < sorted[j]
+	})
+
+	p50Idx := int(math.Ceil(0.50*float64(n))) - 1
+	p95Idx := int(math.Ceil(0.95*float64(n))) - 1
+	p99Idx := int(math.Ceil(0.99*float64(n))) - 1
+	if p50Idx < 0 {
+		p50Idx = 0
+	}
+	if p95Idx < 0 {
+		p95Idx = 0
+	}
+	if p99Idx < 0 {
+		p99Idx = 0
+	}
+
+	stats["p50"] = sorted[p50Idx]
+	stats["p95"] = sorted[p95Idx]
+	stats["p99"] = sorted[p99Idx]
+	return stats
+}
+
+func (p *GNNSpreadPredictor) GetPendingCount() int {
+	p.pendingMu.RLock()
+	defer p.pendingMu.RUnlock()
+	return len(p.pendingRequests)
 }
 
 func (p *GNNSpreadPredictor) cachePrediction(pred *models.ResistancePrediction) {
