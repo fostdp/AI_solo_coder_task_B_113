@@ -81,3 +81,30 @@ batchwriter:
   batchsize: 500
   flushintervalms: 100
   queuesize: 50000
+
+coxvap:
+  enabled: true
+  updateintervalsec: 21600
+  riskthreshold: 0.5
+
+gnn:
+  enabled: true
+  pythonserviceurl: http://gnn-service:8000
+  updateintervalsec: 3600
+  maxnodes: 100
+
+optimizer:
+  enabled: true
+  solveintervalsec: 7200
+  negativepressurebeds: 10
+  nursespershift: 8
+  objectiveweight:
+    infection_risk: 0.4
+    nurse_balance: 0.25
+    room_util: 0.2
+    transport_dist: 0.15
+
+transport:
+  enabled: true
+  foresttrees: 150
+  scorethreshold: 60
