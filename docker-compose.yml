@@ -1,0 +1,297 @@
+version: '3.8'
+
+x-default-logging: &default-logging
+  driver: "json-file"
+  options:
+    max-size: "10m"
+    max-file: "3"
+
+services:
+  timescaledb:
+    image: timescale/timescaledb:2.13.0-pg16
+    container_name: field-hospital-timescaledb
+    restart: unless-stopped
+    environment:
+      POSTGRES_DB: field_hospital
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgres
+      TIMESCALEDB_TELEMETRY: "off"
+    ports:
+      - "5432:5432"
+    volumes:
+      - timescaledb_data:/var/lib/postgresql/data
+      - ./deploy/timescaledb/retention_policy.sql:/docker-entrypoint-initdb.d/99-retention-policy.sql:ro
+    command:
+      - -c
+      - shared_preload_libraries=timescaledb
+      - -c
+      - max_connections=200
+      - -c
+      - shared_buffers=512MB
+      - -c
+      - effective_cache_size=1536MB
+      - -c
+      - maintenance_work_mem=128MB
+      - -c
+      - checkpoint_completion_target=0.9
+      - -c
+      - wal_buffers=16MB
+      - -c
+      - default_statistics_target=500
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U postgres"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  postgres-exporter:
+    image: prometheuscommunity/postgres-exporter:v0.15.0
+    container_name: field-hospital-postgres-exporter
+    restart: unless-stopped
+    environment:
+      DATA_SOURCE_NAME: "postgresql://postgres:postgres@timescaledb:5432/field_hospital?sslmode=disable"
+    ports:
+      - "9187:9187"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  emqx:
+    image: emqx/emqx:5.6.0
+    container_name: field-hospital-emqx
+    restart: unless-stopped
+    environment:
+      EMQX_NAME: field-hospital-broker
+      EMQX_HOST: emqx
+      EMQX_NODE_NAME: emqx@emqx
+      EMQX_LISTENERS__TCP__DEFAULT__BIND: "0.0.0.0:1883"
+      EMQX_LISTENERS__WS__DEFAULT__BIND: "0.0.0.0:8083"
+      EMQX_DASHBOARD__DEFAULT__LISTENERS__HTTP__BIND: "0.0.0.0:18083"
+      EMQX_PERSISTENT_SESSION__ENABLE: "true"
+      EMQX_PERSISTENT_SESSION__SESSION_EXPIRY_INTERVAL: "72h"
+      EMQX_RETAINER__ENABLE: "true"
+      EMQX_RETAINER__BACKEND_TYPE: "ram"
+      EMQX_RETAINER__BACKEND__RAM__STORAGE_TYPE: "ram"
+      EMQX_RETAINER__MAX_RETAINED_MESSAGES: 10000
+      EMQX_MQTT__MAX_PACKET_SIZE: 1MB
+      EMQX_MQTT__SYS_TOPICS__INTERVAL: "15s"
+    ports:
+      - "1883:1883"
+      - "8883:8883"
+      - "8083:8083"
+      - "8084:8084"
+      - "18083:18083"
+    volumes:
+      - emqx_data:/opt/emqx/data
+      - emqx_log:/opt/emqx/log
+    healthcheck:
+      test: ["CMD-SHELL", "emqx ctl status | grep -q 'running' || exit 1"]
+      interval: 30s
+      timeout: 10s
+      retries: 5
+      start_period: 45s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  backend:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: field-hospital-backend
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+      DB_HOST: timescaledb
+      DB_PORT: 5432
+      DB_USER: postgres
+      DB_PASSWORD: postgres
+      DB_NAME: field_hospital
+      DB_SSLMODE: disable
+      MQTT_BROKER: tcp://emqx:1883
+      MQTT_CLIENTID: field-hospital-backend-docker
+    ports:
+      - "8080:8080"
+      - "6060:6060"
+    depends_on:
+      timescaledb:
+        condition: service_healthy
+      emqx:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD-SHELL", "curl -f http://localhost:8080/api/beds || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 30s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile
+    container_name: field-hospital-frontend
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    ports:
+      - "80:80"
+    depends_on:
+      - backend
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost/ || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  simulator:
+    build:
+      context: ./simulator
+      dockerfile: Dockerfile
+    container_name: field-hospital-simulator
+    restart: unless-stopped
+    environment:
+      TZ: Asia/Shanghai
+    command: >
+      --broker tcp://emqx:1883
+      --clientid sensor-simulator-docker
+      --beds 50
+      --interval 1000
+      --sepsis_mode normal
+      --sepsis_duration 300
+    depends_on:
+      emqx:
+        condition: service_healthy
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  prometheus:
+    image: prom/prometheus:v2.51.2
+    container_name: field-hospital-prometheus
+    restart: unless-stopped
+    command:
+      - '--config.file=/etc/prometheus/prometheus.yml'
+      - '--storage.tsdb.path=/prometheus'
+      - '--storage.tsdb.retention.time=30d'
+      - '--storage.tsdb.retention.size=10GB'
+      - '--web.console.libraries=/usr/share/prometheus/console_libraries'
+      - '--web.console.templates=/usr/share/prometheus/consoles'
+      - '--web.enable-lifecycle'
+      - '--web.enable-admin-api'
+    ports:
+      - "9090:9090"
+    volumes:
+      - ./deploy/prometheus/prometheus.yml:/etc/prometheus/prometheus.yml:ro
+      - ./deploy/prometheus/rules:/etc/prometheus/rules:ro
+      - prometheus_data:/prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:9090/-/healthy || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 10s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  grafana:
+    image: grafana/grafana:10.4.2
+    container_name: field-hospital-grafana
+    restart: unless-stopped
+    environment:
+      GF_SECURITY_ADMIN_USER: admin
+      GF_SECURITY_ADMIN_PASSWORD: admin123
+      GF_USERS_ALLOW_SIGN_UP: "false"
+      GF_ANALYTICS_REPORTING_ENABLED: "false"
+      GF_ANALYTICS_CHECK_FOR_UPDATES: "false"
+      GF_INSTALL_PLUGINS: "grafana-clock-panel,grafana-simple-json-datasource"
+    ports:
+      - "3000:3000"
+    volumes:
+      - grafana_data:/var/lib/grafana
+      - ./deploy/grafana/provisioning:/etc/grafana/provisioning:ro
+    depends_on:
+      - prometheus
+    healthcheck:
+      test: ["CMD-SHELL", "wget -q --spider http://localhost:3000/api/health || exit 1"]
+      interval: 30s
+      timeout: 5s
+      retries: 3
+      start_period: 15s
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  node-exporter:
+    image: prom/node-exporter:v1.8.1
+    container_name: field-hospital-node-exporter
+    restart: unless-stopped
+    command:
+      - '--path.procfs=/host/proc'
+      - '--path.sysfs=/host/sys'
+      - '--collector.filesystem.mount-points-exclude'
+      - '^/(sys|proc|dev|host|etc)($$|/)'
+      - '--collector.systemd'
+    pid: host
+    ports:
+      - "9100:9100"
+    volumes:
+      - /proc:/host/proc:ro
+      - /sys:/host/sys:ro
+      - /:/rootfs:ro
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+  cadvisor:
+    image: gcr.io/cadvisor/cadvisor:v0.49.1
+    container_name: field-hospital-cadvisor
+    restart: unless-stopped
+    ports:
+      - "8090:8080"
+    volumes:
+      - /:/rootfs:ro
+      - /var/run:/var/run:rw
+      - /sys:/sys:ro
+      - /var/lib/docker/:/var/lib/docker:ro
+      - /dev/disk/:/dev/disk:ro
+    devices:
+      - /dev/kmsg:/dev/kmsg
+    privileged: true
+    logging: *default-logging
+    networks:
+      - field-hospital-net
+
+volumes:
+  timescaledb_data:
+    driver: local
+  emqx_data:
+    driver: local
+  emqx_log:
+    driver: local
+  prometheus_data:
+    driver: local
+  grafana_data:
+    driver: local
+
+networks:
+  field-hospital-net:
+    driver: bridge
+    ipam:
+      driver: default
+      config:
+        - subnet: 172.28.0.0/16
