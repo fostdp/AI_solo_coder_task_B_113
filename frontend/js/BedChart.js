@@ -135,6 +135,8 @@
         var risk = this.risks[bed.id];
         var vitals = this.vitals[bed.id];
 
+        var vapHighRisk = risk && (risk.vap_risk !== undefined) && risk.vap_risk > 0.7;
+
         var riskInfo = this._computeRiskLevel(risk);
         this._drawPulse(x, y, riskInfo);
 
@@ -146,11 +148,15 @@
         ctx.fillStyle = riskInfo.level === 'critical' ? 'rgba(239, 68, 68, 0.25)'
             : riskInfo.level === 'warning' ? 'rgba(245, 158, 11, 0.25)'
             : 'rgba(30, 58, 100, 0.7)';
-        ctx.strokeStyle = riskInfo.color;
-        ctx.lineWidth = 2;
+        ctx.strokeStyle = vapHighRisk ? '#ef4444' : riskInfo.color;
+        ctx.lineWidth = vapHighRisk ? 4 : 2;
+        if (vapHighRisk) {
+            ctx.setLineDash([5, 3]);
+        }
         this._roundRect(bx, by, bw, bh, 8);
         ctx.fill();
         ctx.stroke();
+        ctx.setLineDash([]);
 
         ctx.fillStyle = '#fff';
         ctx.font = 'bold 13px sans-serif';
@@ -173,6 +179,12 @@
             ctx.fillStyle = '#fff';
             ctx.font = 'bold 9px sans-serif';
             ctx.fillText('!', x + bw / 2 - 8, by - 3);
+        }
+
+        if (vapHighRisk) {
+            ctx.font = 'bold 14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText('\u26a0\ufe0f', x - bw / 2 + 8, by - 4);
         }
     };
 
