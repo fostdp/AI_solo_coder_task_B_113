@@ -1,0 +1,62 @@
+syntax = "proto3";
+package vap_cox;
+option go_package = "vap_cox/proto";
+
+service VapCoxService {
+    rpc EvaluateBed (EvaluateBedRequest) returns (EvaluateBedResponse);
+    rpc EvaluateAllBeds (EvaluateAllRequest) returns (stream EvaluateBedResponse);
+    rpc ComputeConcordanceIndex (CIndexRequest) returns (CIndexResponse);
+    rpc GetStats (StatsRequest) returns (StatsResponse);
+}
+
+message VentilatorParam {
+    uint32 bed_id = 1;
+    float peak_pressure = 2;
+    float tidal_volume = 3;
+    float predicted_weight = 4;
+    float oral_secretion = 5;
+    int32 ventilator_hours = 6;
+    int32 prior_infection = 7;
+    int64 timestamp_unix = 8;
+}
+
+message EvaluateBedRequest {
+    uint32 bed_id = 1;
+    repeated VentilatorParam history = 2;
+}
+
+message EvaluateBedResponse {
+    uint32 bed_id = 1;
+    float risk_probability = 2;
+    float hazards_ratio = 3;
+    float predicted_onset_hours = 4;
+    map<string, float> features = 5;
+    map<string, float> feature_weights = 6;
+    int64 evaluated_at_unix = 7;
+    bool success = 8;
+    string error = 9;
+}
+
+message EvaluateAllRequest {
+    repeated EvaluateBedRequest beds = 1;
+}
+
+message CIndexRequest {
+    repeated float predictions = 1;
+    repeated int32 events = 2;
+    repeated float times = 3;
+}
+
+message CIndexResponse {
+    float c_index = 1;
+    float baseline_c_index = 2;
+    string note = 3;
+}
+
+message StatsRequest {}
+message StatsResponse {
+    int32 pool_size = 1;
+    int32 active_tasks = 2;
+    int64 total_evaluations = 3;
+    int64 total_p99_latency_us = 4;
+}
