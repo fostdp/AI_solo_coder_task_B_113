@@ -249,3 +249,151 @@ SELECT
 FROM alerts
 WHERE acknowledged = FALSE
 GROUP BY bed_id;
+
+-- =============================================
+-- 呼吸机参数超表 (VAP风险预测输入)
+-- =============================================
+CREATE TABLE IF NOT EXISTS ventilator_params (
+    bed_id INTEGER NOT NULL REFERENCES beds(id) ON DELETE CASCADE,
+    time TIMESTAMPTZ NOT NULL,
+    peak_pressure DOUBLE PRECISION,
+    tidal_volume DOUBLE PRECISION,
+    oral_secretion_grade DOUBLE PRECISION,
+    ventilator_hours INTEGER,
+    PRIMARY KEY(time, bed_id)
+);
+
+SELECT create_hypertable('ventilator_params', 'time', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_vent_bed_time ON ventilator_params (bed_id, time DESC);
+
+-- =============================================
+-- VAP风险预测结果超表 (Cox模型输出)
+-- =============================================
+CREATE TABLE IF NOT EXISTS vap_risk_records (
+    id SERIAL,
+    bed_id INTEGER NOT NULL REFERENCES beds(id),
+    time TIMESTAMPTZ NOT NULL,
+    risk_probability DOUBLE PRECISION NOT NULL,
+    hazards_ratio DOUBLE PRECISION NOT NULL,
+    predicted_onset_hours DOUBLE PRECISION,
+    feature_weights JSONB,
+    PRIMARY KEY(time, id)
+);
+
+SELECT create_hypertable('vap_risk_records', 'time', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_vap_risk_bed_time ON vap_risk_records (bed_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_vap_risk_prob ON vap_risk_records (risk_probability DESC, time DESC);
+
+-- =============================================
+-- 细菌培养结果表
+-- =============================================
+CREATE TABLE IF NOT EXISTS culture_results (
+    id SERIAL PRIMARY KEY,
+    bed_id INTEGER NOT NULL REFERENCES beds(id),
+    bacteria_name VARCHAR(100),
+    resistance_genes VARCHAR(500),
+    antibiotic_sensitivity JSONB,
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_culture_bed_time ON culture_results (bed_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_culture_bacteria ON culture_results (bacteria_name, time DESC);
+
+-- =============================================
+-- GNN耐药传播预测结果超表
+-- =============================================
+CREATE TABLE IF NOT EXISTS resistance_predictions (
+    id SERIAL,
+    bed_id INTEGER REFERENCES beds(id),
+    time TIMESTAMPTZ NOT NULL,
+    bacteria_name VARCHAR(100),
+    gene_spread_prob DOUBLE PRECISION,
+    spread_path INTEGER[],
+    edge_weights FLOAT[],
+    PRIMARY KEY(time, id)
+);
+
+SELECT create_hypertable('resistance_predictions', 'time', if_not_exists => TRUE);
+
+CREATE INDEX IF NOT EXISTS idx_resist_pred_bed_time ON resistance_predictions (bed_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_resist_pred_bacteria ON resistance_predictions (bacteria_name, time DESC);
+CREATE INDEX IF NOT EXISTS idx_resist_pred_prob ON resistance_predictions (gene_spread_prob DESC, time DESC);
+
+-- =============================================
+-- 优化调度求解结果表
+-- =============================================
+CREATE TABLE IF NOT EXISTS optimizer_solutions (
+    id SERIAL PRIMARY KEY,
+    solve_time_ms INTEGER,
+    negative_pressure_assign JSONB,
+    nurse_schedule JSONB,
+    unmet_needs TEXT[],
+    cost DOUBLE PRECISION,
+    status VARCHAR(20),
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_opt_sol_status_time ON optimizer_solutions (status, time DESC);
+CREATE INDEX IF NOT EXISTS idx_opt_sol_cost ON optimizer_solutions (cost, time DESC);
+
+-- =============================================
+-- 转运请求表
+-- =============================================
+CREATE TABLE IF NOT EXISTS transport_requests (
+    id SERIAL PRIMARY KEY,
+    from_bed INTEGER REFERENCES beds(id),
+    to_bed INTEGER REFERENCES beds(id),
+    distance_meters INTEGER,
+    priority INTEGER,
+    urgent BOOLEAN DEFAULT FALSE,
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transport_from_time ON transport_requests (from_bed, time DESC);
+CREATE INDEX IF NOT EXISTS idx_transport_to_time ON transport_requests (to_bed, time DESC);
+CREATE INDEX IF NOT EXISTS idx_transport_urgent ON transport_requests (urgent, time DESC);
+
+-- =============================================
+-- 转运风险评估结果表
+-- =============================================
+CREATE TABLE IF NOT EXISTS transport_risk_results (
+    id SERIAL PRIMARY KEY,
+    request_id INTEGER REFERENCES transport_requests(id) ON DELETE CASCADE,
+    risk_score INTEGER,
+    risk_level VARCHAR(20),
+    adverse_event_prob DOUBLE PRECISION,
+    feature_contrib JSONB,
+    recommendations TEXT[],
+    time TIMESTAMPTZ NOT NULL DEFAULT NOW()
+);
+
+CREATE INDEX IF NOT EXISTS idx_transport_risk_req_time ON transport_risk_results (request_id, time DESC);
+CREATE INDEX IF NOT EXISTS idx_transport_risk_level ON transport_risk_results (risk_level, time DESC);
+
+-- =============================================
+-- 连续聚合：VAP风险每小时聚合
+-- =============================================
+CREATE MATERIALIZED VIEW IF NOT EXISTS vap_risk_1h
+WITH (timescaledb.continuous) AS
+SELECT
+    time_bucket('1 hour', time) AS bucket,
+    bed_id,
+    AVG(risk_probability) AS avg_risk_probability,
+    AVG(hazards_ratio) AS avg_hazards_ratio,
+    COUNT(*) AS record_count
+FROM vap_risk_records
+GROUP BY bucket, bed_id
+WITH NO DATA;
+
+SELECT add_continuous_aggregate_policy('vap_risk_1h',
+    start_offset => INTERVAL '2 hours',
+    end_offset => INTERVAL '1 hour',
+    schedule_interval => INTERVAL '1 hour');
+
+-- =============================================
+-- 数据保留策略
+-- =============================================
+SELECT add_retention_policy('ventilator_params', INTERVAL '30 days', if_not_exists => TRUE);
+SELECT add_retention_policy('vap_risk_records', INTERVAL '365 days', if_not_exists => TRUE);
