@@ -48,6 +48,10 @@
             <button class="tab-btn" data-tab="vitals">实时监护</button>
             <button class="tab-btn" data-tab="heatmap">感染热力图</button>
             <button class="tab-btn" data-tab="alerts">告警中心</button>
+            <button class="tab-btn" data-tab="vap">VAP风险评估</button>
+            <button class="tab-btn" data-tab="resistance">耐药传播图谱</button>
+            <button class="tab-btn" data-tab="optimizer">资源调度中心</button>
+            <button class="tab-btn" data-tab="transport">转运风险评估</button>
         </nav>
 
         <main class="main-content">
@@ -196,6 +200,135 @@
                     </div>
                     <div class="alerts-list" id="alertsList">
                         <div class="alerts-empty">暂无告警</div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-vap">
+                <div class="vap-container">
+                    <div id="vap-alert-banner" class="vap-alert-banner" style="display:none;"></div>
+                    <div class="vap-header">
+                        <h3>呼吸机相关性肺炎(VAP)风险评估</h3>
+                        <p class="vap-description">基于Cox比例风险模型，综合评估各床位患者的VAP发生风险，包含机械通气时长、气道护理、分泌物情况等多维度因素。</p>
+                    </div>
+                    <div class="vap-content">
+                        <div class="vap-table-wrapper">
+                            <table id="vap-table" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>床位</th>
+                                        <th>患者</th>
+                                        <th>通气天数</th>
+                                        <th>VAP风险值</th>
+                                        <th>风险等级</th>
+                                        <th>主要风险因素</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                        <div id="vap-chart" style="width:100%;height:400px;margin-top:20px;"></div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-resistance">
+                <div class="resistance-container" style="display:flex;gap:20px;height:calc(100vh - 180px);">
+                    <div id="resistance-graph" style="flex:1;background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;"></div>
+                    <aside id="resistance-panel" style="width:340px;background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:20px;overflow-y:auto;">
+                        <h3 style="color:#fff;margin-bottom:16px;">耐药传播分析</h3>
+                        <div id="resistance-panel-content">
+                            <p style="color:#8b9bb4;font-size:13px;">点击图中节点查看详细传播路径信息。</p>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-optimizer">
+                <div class="optimizer-container" style="display:flex;gap:20px;height:calc(100vh - 180px);">
+                    <div class="optimizer-main" style="flex:1;display:flex;flex-direction:column;gap:16px;">
+                        <div class="optimizer-section" style="background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:16px;">
+                            <h4 style="color:#fff;margin-bottom:12px;">负压病房分配</h4>
+                            <div id="room-assign-grid" style="display:grid;grid-template-columns:repeat(auto-fill,minmax(100px,1fr));gap:10px;"></div>
+                        </div>
+                        <div class="optimizer-section" style="flex:1;background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:16px;overflow:auto;">
+                            <h4 style="color:#fff;margin-bottom:12px;">护士排班表</h4>
+                            <table id="nurse-schedule-table" class="data-table">
+                                <thead>
+                                    <tr>
+                                        <th>护士</th>
+                                        <th>负责床位</th>
+                                        <th>班次</th>
+                                        <th>工作负荷</th>
+                                        <th>状态</th>
+                                    </tr>
+                                </thead>
+                                <tbody></tbody>
+                            </table>
+                        </div>
+                    </div>
+                    <aside class="optimizer-sidebar" style="width:340px;background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:16px;overflow-y:auto;">
+                        <h4 style="color:#fff;margin-bottom:12px;">调度建议</h4>
+                        <div id="suggestion-list"></div>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-transport">
+                <div class="transport-container" style="max-width:900px;margin:0 auto;">
+                    <div class="transport-header" style="background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:20px;margin-bottom:20px;">
+                        <h3 style="color:#fff;margin-bottom:8px;">患者转运风险评估</h3>
+                        <p style="color:#8b9bb4;font-size:13px;">基于随机森林模型，评估患者在转运过程中的感染传播、病情恶化等综合风险。</p>
+                    </div>
+                    <form id="transport-form" style="background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:24px;margin-bottom:20px;">
+                        <div style="display:grid;grid-template-columns:1fr 1fr;gap:16px;margin-bottom:16px;">
+                            <div>
+                                <label style="display:block;color:#8b9bb4;font-size:12px;margin-bottom:6px;">起始床位</label>
+                                <input type="number" name="from_bed" required min="1" style="width:100%;padding:10px;background:#1a2a4a;border:1px solid #2a4a7a;border-radius:6px;color:#fff;font-size:14px;">
+                            </div>
+                            <div>
+                                <label style="display:block;color:#8b9bb4;font-size:12px;margin-bottom:6px;">目标床位/科室</label>
+                                <input type="text" name="to_bed" required placeholder="如：ICU-023 或 手术室" style="width:100%;padding:10px;background:#1a2a4a;border:1px solid #2a4a7a;border-radius:6px;color:#fff;font-size:14px;">
+                            </div>
+                            <div>
+                                <label style="display:block;color:#8b9bb4;font-size:12px;margin-bottom:6px;">转运距离(米)</label>
+                                <input type="number" name="distance" required min="1" value="100" style="width:100%;padding:10px;background:#1a2a4a;border:1px solid #2a4a7a;border-radius:6px;color:#fff;font-size:14px;">
+                            </div>
+                            <div>
+                                <label style="display:block;color:#8b9bb4;font-size:12px;margin-bottom:6px;">优先级</label>
+                                <select name="priority" style="width:100%;padding:10px;background:#1a2a4a;border:1px solid #2a4a7a;border-radius:6px;color:#fff;font-size:14px;">
+                                    <option value="low">普通</option>
+                                    <option value="medium" selected>常规</option>
+                                    <option value="high">紧急</option>
+                                </select>
+                            </div>
+                            <div style="grid-column:span 2;">
+                                <label style="display:flex;align-items:center;gap:8px;color:#8b9bb4;font-size:13px;cursor:pointer;">
+                                    <input type="checkbox" name="is_emergency" style="width:18px;height:18px;">
+                                    <span>紧急转运(跳过部分预检)</span>
+                                </label>
+                            </div>
+                        </div>
+                        <button type="submit" class="btn btn-primary" style="width:100%;padding:12px;font-size:15px;">评估转运风险</button>
+                    </form>
+                    <div id="transport-result" style="display:none;background:#0d1a30;border-radius:12px;border:1px solid #1e3a5f;padding:24px;">
+                        <h4 style="color:#fff;margin-bottom:16px;">评估结果</h4>
+                        <div style="margin-bottom:16px;">
+                            <div style="display:flex;justify-content:space-between;margin-bottom:8px;">
+                                <span style="color:#8b9bb4;font-size:13px;">综合风险分数</span>
+                                <span id="transport-risk-score" style="color:#fff;font-size:18px;font-weight:700;">0</span>
+                            </div>
+                            <div class="risk-bar">
+                                <div id="transport-risk-bar-fill" class="risk-bar-fill" style="width:0%;"></div>
+                            </div>
+                            <div style="margin-top:12px;text-align:center;">
+                                <span id="transport-risk-badge" class="risk-level-badge"></span>
+                            </div>
+                        </div>
+                        <div>
+                            <h5 style="color:#fff;margin-bottom:10px;">建议措施</h5>
+                            <ul id="transport-recommendations" style="list-style:none;padding:0;"></ul>
+                        </div>
                     </div>
                 </div>
             </section>
