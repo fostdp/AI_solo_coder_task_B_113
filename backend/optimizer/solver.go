@@ -23,6 +23,10 @@ type BedOptimizer struct {
 	bedOccupancy         map[uint32]bool
 	latestSolution       *models.OptimizerSolution
 	latestSuggestion     []map[string]interface{}
+	stabilityLambda      float64
+	changeRateHistory    []float64
+	prevAssignments      map[uint32]string
+	prevSchedule         map[string][]uint32
 	mu                   sync.RWMutex
 	stopChan             chan struct{}
 	wg                   sync.WaitGroup
@@ -36,6 +40,10 @@ func NewBedOptimizer(cfg config.OptimizerConfig) *BedOptimizer {
 		bedOccupancy:     make(map[uint32]bool),
 		latestSuggestion: make([]map[string]interface{}, 0),
 		stopChan:         make(chan struct{}),
+		stabilityLambda:  0.5,
+		changeRateHistory: make([]float64, 0, 100),
+		prevAssignments:   make(map[uint32]string),
+		prevSchedule:      make(map[string][]uint32),
 	}
 	Instance = opt
 	return opt
@@ -109,16 +117,28 @@ func (b *BedOptimizer) SolveAndBroadcast() {
 	if npCapacity <= 0 {
 		npCapacity = 10
 	}
-	assignments := b.SolveNegativePressure(beds, bedRisks, npCapacity)
+	assignments := b.solveWithStability(beds, bedRisks, npCapacity)
 
 	nursesPerShift := b.cfg.NursesPerShift
 	if nursesPerShift <= 0 {
 		nursesPerShift = 3
 	}
 	totalNurses := nursesPerShift * 3
-	schedule := b.SolveNurseSchedule(beds, totalNurses)
+	schedule := b.solveScheduleWithStability(beds, totalNurses)
 
 	objective := b.ComputeCost(assignments, schedule, bedRisks)
+
+	stabilityCost := b.l1RegularizationCost(assignments, schedule)
+	objective.TotalCost += stabilityCost
+
+	assignChangeRate := b.computeAssignmentChangeRate(b.prevAssignments, assignments)
+	scheduleChangeRate := b.computeScheduleChangeRate(b.prevSchedule, schedule)
+	overallChangeRate := (assignChangeRate + scheduleChangeRate) / 2.0
+
+	b.changeRateHistory = append(b.changeRateHistory, overallChangeRate)
+	if len(b.changeRateHistory) > 100 {
+		b.changeRateHistory = b.changeRateHistory[len(b.changeRateHistory)-100:]
+	}
 
 	decisions := make([]map[string]interface{}, 0, len(beds))
 	for _, bedID := range beds {
@@ -159,6 +179,9 @@ func (b *BedOptimizer) SolveAndBroadcast() {
 	prevSolution := b.latestSolution
 	b.latestSolution = newSolution
 	b.latestSuggestion = b.GenerateSuggestions(prevSolution, newSolution)
+
+	b.prevAssignments = assignments
+	b.prevSchedule = schedule
 
 	log.Printf("[OPTIMIZER] 解已生成: %s, 总成本=%.4f, 床位=%d, NP病房=%d, 护士=%d",
 		solutionID, objective.TotalCost, len(beds), npCapacity, totalNurses)
@@ -371,6 +394,234 @@ func (b *BedOptimizer) ComputeCost(assignments map[uint32]string, schedule map[s
 	return obj
 }
 
+func (b *BedOptimizer) computeAssignmentChangeRate(
+	prev, curr map[uint32]string,
+) float64 {
+	if len(prev) == 0 || len(curr) == 0 {
+		return 1.0
+	}
+	total := 0
+	changed := 0
+	for bedID, currRoom := range curr {
+		total++
+		prevRoom, exists := prev[bedID]
+		if !exists || prevRoom != currRoom {
+			changed++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(changed) / float64(total)
+}
+
+func (b *BedOptimizer) computeScheduleChangeRate(
+	prev, curr map[string][]uint32,
+) float64 {
+	if len(prev) == 0 || len(curr) == 0 {
+		return 1.0
+	}
+	prevBedNurse := make(map[uint32]string)
+	for nurse, beds := range prev {
+		for _, bedID := range beds {
+			prevBedNurse[bedID] = nurse
+		}
+	}
+	currBedNurse := make(map[uint32]string)
+	for nurse, beds := range curr {
+		for _, bedID := range beds {
+			currBedNurse[bedID] = nurse
+		}
+	}
+	total := 0
+	changed := 0
+	for bedID, currNurse := range currBedNurse {
+		total++
+		prevNurse, exists := prevBedNurse[bedID]
+		if !exists || prevNurse != currNurse {
+			changed++
+		}
+	}
+	if total == 0 {
+		return 0
+	}
+	return float64(changed) / float64(total)
+}
+
+func (b *BedOptimizer) l1RegularizationCost(
+	assignments map[uint32]string,
+	schedule map[string][]uint32,
+) float64 {
+	b.mu.RLock()
+	hasPrev := len(b.prevAssignments) > 0 && len(b.prevSchedule) > 0
+	b.mu.RUnlock()
+
+	if !hasPrev {
+		return 0
+	}
+
+	assignPenalty := 0.0
+	for bedID, currRoom := range assignments {
+		b.mu.RLock()
+		prevRoom := b.prevAssignments[bedID]
+		b.mu.RUnlock()
+		if prevRoom != "" && prevRoom != currRoom {
+			assignPenalty += 1.0
+		}
+	}
+
+	prevBedNurse := make(map[uint32]string)
+	b.mu.RLock()
+	for nurse, beds := range b.prevSchedule {
+		for _, bedID := range beds {
+			prevBedNurse[bedID] = nurse
+		}
+	}
+	b.mu.RUnlock()
+
+	nursePenalty := 0.0
+	for nurse, beds := range schedule {
+		for _, bedID := range beds {
+			prevNurse := prevBedNurse[bedID]
+			if prevNurse != "" && prevNurse != nurse {
+				nursePenalty += 1.0
+			}
+		}
+	}
+
+	totalBeds := float64(len(assignments))
+	if totalBeds > 0 {
+		assignPenalty /= totalBeds
+		nursePenalty /= totalBeds
+	}
+
+	return b.stabilityLambda * (assignPenalty + nursePenalty)
+}
+
+func (b *BedOptimizer) solveWithStability(
+	beds []uint32,
+	bedRisks map[uint32]float64,
+	capacity int,
+) map[uint32]string {
+	baseResult := b.SolveNegativePressure(beds, bedRisks, capacity)
+
+	b.mu.RLock()
+	hasPrev := len(b.prevAssignments) > 0
+	b.mu.RUnlock()
+
+	if !hasPrev || b.stabilityLambda <= 0 {
+		return baseResult
+	}
+
+	b.mu.RLock()
+	prevNPBeds := make(map[uint32]bool)
+	for bedID, room := range b.prevAssignments {
+		if len(room) >= 2 && room[:2] == "NP" {
+			prevNPBeds[bedID] = true
+		}
+	}
+	b.mu.RUnlock()
+
+	type bedStabilityPair struct {
+		bedID uint32
+		risk  float64
+		wasNP bool
+	}
+	pairs := make([]bedStabilityPair, 0, len(beds))
+	for _, bedID := range beds {
+		pairs = append(pairs, bedStabilityPair{
+			bedID: bedID,
+			risk:  bedRisks[bedID],
+			wasNP: prevNPBeds[bedID],
+		})
+	}
+
+	sort.Slice(pairs, func(i, j int) bool {
+		scoreI := pairs[i].risk
+		if !pairs[i].wasNP {
+			scoreI -= b.stabilityLambda * 0.3
+		}
+		scoreJ := pairs[j].risk
+		if !pairs[j].wasNP {
+			scoreJ -= b.stabilityLambda * 0.3
+		}
+		return scoreI > scoreJ
+	})
+
+	result := make(map[uint32]string)
+	npCount := 0
+	wardCount := 0
+	for _, pair := range pairs {
+		if npCount < capacity {
+			npCount++
+			result[pair.bedID] = fmt.Sprintf("NP-%03d", npCount)
+		} else {
+			wardCount++
+			result[pair.bedID] = fmt.Sprintf("WARD-%03d", wardCount)
+		}
+	}
+	return result
+}
+
+func (b *BedOptimizer) solveScheduleWithStability(
+	beds []uint32,
+	numNurses int,
+) map[string][]uint32 {
+	baseSchedule := b.SolveNurseSchedule(beds, numNurses)
+
+	b.mu.RLock()
+	hasPrev := len(b.prevSchedule) > 0
+	b.mu.RUnlock()
+
+	if !hasPrev || b.stabilityLambda <= 0 {
+		return baseSchedule
+	}
+
+	b.mu.RLock()
+	prevBedNurse := make(map[uint32]string)
+	for nurse, bedList := range b.prevSchedule {
+		for _, bedID := range bedList {
+			prevBedNurse[bedID] = nurse
+		}
+	}
+	b.mu.RUnlock()
+
+	nurseBeds := make(map[string][]uint32)
+	for nurse := range baseSchedule {
+		nurseBeds[nurse] = make([]uint32, 0)
+	}
+
+	unassigned := make([]uint32, 0)
+	for _, bedID := range beds {
+		prevNurse := prevBedNurse[bedID]
+		if prevNurse != "" {
+			if _, exists := nurseBeds[prevNurse]; exists {
+				nurseBeds[prevNurse] = append(nurseBeds[prevNurse], bedID)
+				continue
+			}
+		}
+		unassigned = append(unassigned, bedID)
+	}
+
+	b.localSearchNurseBalance(nurseBeds)
+
+	nursesSorted := make([]string, 0, len(nurseBeds))
+	for n := range nurseBeds {
+		nursesSorted = append(nursesSorted, n)
+	}
+	sort.Strings(nursesSorted)
+
+	for idx, bedID := range unassigned {
+		nurseIdx := idx % numNurses
+		if nurseIdx < len(nursesSorted) {
+			nurseBeds[nursesSorted[nurseIdx]] = append(nurseBeds[nursesSorted[nurseIdx]], bedID)
+		}
+	}
+
+	b.localSearchNurseBalance(nurseBeds)
+	return nurseBeds
+}
+
 func (b *BedOptimizer) GenerateSuggestions(prev, curr *models.OptimizerSolution) []map[string]interface{} {
 	suggestions := make([]map[string]interface{}, 0)
 
@@ -453,6 +704,40 @@ func (b *BedOptimizer) GetSuggestions() []map[string]interface{} {
 	result := make([]map[string]interface{}, len(b.latestSuggestion))
 	copy(result, b.latestSuggestion)
 	return result
+}
+
+func (b *BedOptimizer) GetLatestChangeRate() float64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.changeRateHistory) == 0 {
+		return 0.3
+	}
+	return b.changeRateHistory[len(b.changeRateHistory)-1]
+}
+
+func (b *BedOptimizer) GetAverageChangeRate() float64 {
+	b.mu.RLock()
+	defer b.mu.RUnlock()
+	if len(b.changeRateHistory) == 0 {
+		return 0.3
+	}
+	sum := 0.0
+	for _, r := range b.changeRateHistory {
+		sum += r
+	}
+	return sum / float64(len(b.changeRateHistory))
+}
+
+func (b *BedOptimizer) SetStabilityLambda(lambda float64) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+	if lambda < 0 {
+		lambda = 0
+	}
+	if lambda > 2.0 {
+		lambda = 2.0
+	}
+	b.stabilityLambda = lambda
 }
 
 func GetInstance() *BedOptimizer {
