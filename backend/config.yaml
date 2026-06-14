@@ -1,0 +1,83 @@
+server:
+  port: "8080"
+
+database:
+  host: "localhost"
+  port: "5432"
+  user: "postgres"
+  password: "postgres"
+  dbname: "field_hospital"
+  sslmode: "disable"
+
+mqtt:
+  broker: "tcp://localhost:1883"
+  clientid: "field-hospital-backend"
+  username: ""
+  password: ""
+  qos: 1
+  cleansession: false
+  keepalive: 60
+  messagechanneldepth: 10000
+  decodeworkers: 4
+  decodequeuesize: 20000
+
+alert:
+  sofathreshold: 2.0
+  infectionthreshold: 0.7
+  smsgateway: "http://localhost:9090/sms"
+  deduplicationwindow: 5
+
+ml:
+  lstmsequencelength: 60
+  modelupdateinterval: 300
+  numofbeds: 50
+  buffersize: 120
+  predictioninterval: 5
+
+  lstm:
+    inputsize: 4
+    hiddensize: 32
+    outputsize: 1
+    mamlweight: 0.7
+    sofaweight: 0.3
+    fallbackbaserate: 0.15
+    lstmoutputweight: 0.05
+    lstmoutputbias: 0.5
+
+  maml:
+    innerlr: 0.01
+    outerlr: 0.001
+    adaptsteps: 5
+    stoploss: 0.01
+    seqlength: 30
+    minadaptseq: 10
+
+  randomforest:
+    numtrees: 100
+    treeweightmin: 0.5
+    treeweightmax: 1.0
+    featureweightsets:
+      - [0.25, 0.30, 0.15, 0.20, 0.10]
+      - [0.20, 0.35, 0.10, 0.25, 0.10]
+      - [0.30, 0.25, 0.20, 0.15, 0.10]
+    creriskantibioticcoef: 0.03
+    creriskinvasivecoef: 0.02
+    crerisknoise: 0.05
+    mrsariskantibioticcoef: 0.025
+    mrsariskinvasivecoef: 0.025
+    mrsarisknoise: 0.05
+
+  normalization:
+    ecgmean: 75
+    ecgstd: 30
+    ventilatormean: 18
+    ventilatorstd: 10
+    spo2mean: 96
+    spo2std: 10
+    temperaturemean: 36.8
+    temperaturestd: 2
+
+batchwriter:
+  batchsize: 500
+  flushintervalms: 100
+  queuesize: 50000
