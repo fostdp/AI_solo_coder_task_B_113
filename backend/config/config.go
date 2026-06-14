@@ -119,6 +119,8 @@ type GNNConfig struct {
 	PythonServiceURL  string
 	UpdateIntervalSec int
 	MaxNodes          int
+	NumOfBeds         int
+	NumFeatures       int
 }
 
 type OptimizerConfig struct {
