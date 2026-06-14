@@ -1,0 +1,94 @@
+groups:
+  - name: field-hospital.rules
+    rules:
+      - alert: HighSepsisRisk
+        expr: field_hospital_high_risk_patients{risk_type="sepsis"} > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "高脓毒症风险患者数异常: {{ $value }}"
+          description: "当前有 {{ $value }} 名患者脓毒症风险超过阈值，已持续5分钟"
+
+      - alert: HighInfectionRisk
+        expr: field_hospital_high_risk_patients{risk_type="infection"} > 5
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "高感染风险患者数异常: {{ $value }}"
+          description: "当前有 {{ $value }} 名患者感染风险超过阈值，已持续5分钟"
+
+      - alert: MQTTMessagesDropped
+        expr: increase(field_hospital_mqtt_messages_dropped_total[5m]) > 100
+        for: 2m
+        labels:
+          severity: critical
+        annotations:
+          summary: "MQTT消息丢弃率过高"
+          description: "过去5分钟丢弃了 {{ $value }} 条MQTT消息，可能存在处理瓶颈"
+
+      - alert: HighSOFAScore
+        expr: field_hospital_sofa_score_distribution_bucket{le="24"} - field_hospital_sofa_score_distribution_bucket{le="12"} > 3
+        for: 5m
+        labels:
+          severity: critical
+        annotations:
+          summary: "多名患者SOFA评分过高"
+          description: "有 {{ $value }} 名患者SOFA评分 > 12，需要立即关注"
+
+      - alert: WebSocketDisconnects
+        expr: deriv(field_hospital_websocket_clients_active[5m]) < -0.5
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "WebSocket连接快速下降"
+          description: "WebSocket连接数在5分钟内快速下降"
+
+  - name: infrastructure.rules
+    rules:
+      - alert: ServiceDown
+        expr: up == 0
+        for: 1m
+        labels:
+          severity: critical
+        annotations:
+          summary: "服务宕机: {{ $labels.job }}"
+          description: "{{ $labels.job }} 服务已经宕机超过1分钟"
+
+      - alert: HighCPUUsage
+        expr: 100 - (avg by(instance) (rate(node_cpu_seconds_total{mode="idle"}[5m])) * 100) > 80
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "CPU使用率过高: {{ $labels.instance }}"
+          description: "CPU使用率超过80%，当前值: {{ $value }}%"
+
+      - alert: HighMemoryUsage
+        expr: (1 - (node_memory_MemAvailable_bytes / node_memory_MemTotal_bytes)) * 100 > 85
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "内存使用率过高: {{ $labels.instance }}"
+          description: "内存使用率超过85%，当前值: {{ $value }}%"
+
+      - alert: LowDiskSpace
+        expr: (node_filesystem_avail_bytes{fstype!~"tmpfs|overlay"} / node_filesystem_size_bytes{fstype!~"tmpfs|overlay"}) * 100 < 15
+        for: 5m
+        labels:
+          severity: warning
+        annotations:
+          summary: "磁盘空间不足: {{ $labels.instance }}"
+          description: "磁盘剩余空间不足15%，当前值: {{ $value }}%"
+
+      - alert: DatabaseConnectionPoolExhausted
+        expr: pg_stat_database_numbackends > 150
+        for: 2m
+        labels:
+          severity: warning
+        annotations:
+          summary: "数据库连接池接近满载"
+          description: "当前数据库连接数: {{ $value }}"
