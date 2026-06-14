@@ -2,14 +2,19 @@ package handlers
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"strconv"
 	"time"
 
+	"field-hospital-icu/cox_vap"
 	"field-hospital-icu/database"
-	"field-hospital-icu/models"
-	"field-hospital-icu/sepsis_lstm"
+	"field-hospital-icu/gnn_resistance"
 	"field-hospital-icu/infection_rf"
+	"field-hospital-icu/models"
+	"field-hospital-icu/optimizer"
+	"field-hospital-icu/sepsis_lstm"
+	"field-hospital-icu/transport_rf"
 	"field-hospital-icu/alert_ws"
 
 	"github.com/gin-gonic/gin"
@@ -366,4 +371,253 @@ func WebSocketHandler(c *gin.Context) {
 			break
 		}
 	}
+}
+
+type ResistanceHeatmapItem struct {
+	BedID       uint32    `json:"bed_id"`
+	BedCode     string    `json:"bed_code"`
+	X           float64   `json:"x"`
+	Y           float64   `json:"y"`
+	Bacteria    string    `json:"bacteria"`
+	SpreadProb  float64   `json:"spread_prob"`
+	Path        []uint32  `json:"path"`
+}
+
+func GetAllVapRisks(c *gin.Context) {
+	if cox_vap.Instance == nil {
+		c.JSON(503, gin.H{"error": "VAP模块未启用"})
+		return
+	}
+	risks := cox_vap.Instance.GetAllLatest()
+	c.JSON(200, risks)
+}
+
+func GetBedVapRisk(c *gin.Context) {
+	bedID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid bed id"})
+		return
+	}
+
+	rows, err := database.DB.Query(context.Background(),
+		`SELECT id, bed_id, risk_probability, hazards_ratio, predicted_onset_hours, feature_weights, time
+		 FROM vap_risk_records WHERE bed_id = $1 ORDER BY time DESC LIMIT 100`, bedID)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	records := make([]models.VapRiskRecord, 0)
+	for rows.Next() {
+		var r models.VapRiskRecord
+		var featureWeightsJSON []byte
+		if err := rows.Scan(&r.ID, &r.BedID, &r.RiskProbability, &r.HazardsRatio,
+			&r.PredictedOnsetHours, &featureWeightsJSON, &r.Time); err == nil {
+			if len(featureWeightsJSON) > 0 {
+				_ = json.Unmarshal(featureWeightsJSON, &r.FeatureWeights)
+			}
+			if r.FeatureWeights == nil {
+				r.FeatureWeights = make(map[string]float64)
+			}
+			records = append(records, r)
+		}
+	}
+
+	c.JSON(200, records)
+}
+
+func GetAllResistancePredictions(c *gin.Context) {
+	if gnn_resistance.Instance == nil {
+		c.JSON(503, gin.H{"error": "耐药传播模块未启用"})
+		return
+	}
+	predictions := gnn_resistance.Instance.GetAllPredictions()
+	c.JSON(200, predictions)
+}
+
+func GetResistanceHeatmap(c *gin.Context) {
+	if gnn_resistance.Instance == nil {
+		c.JSON(503, gin.H{"error": "耐药传播模块未启用"})
+		return
+	}
+
+	rows, err := database.DB.Query(context.Background(),
+		`SELECT b.id, b.bed_code, b.location_x, b.location_y
+		 FROM beds b ORDER BY b.id`)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+	defer rows.Close()
+
+	predictions := gnn_resistance.Instance.GetAllPredictions()
+	heatmap := make([]ResistanceHeatmapItem, 0)
+
+	for rows.Next() {
+		var item ResistanceHeatmapItem
+		var bedID int
+		if err := rows.Scan(&bedID, &item.BedCode, &item.X, &item.Y); err == nil {
+			item.BedID = uint32(bedID)
+			if pred, ok := predictions[item.BedID]; ok {
+				item.Bacteria = pred.BacteriaName
+				item.SpreadProb = pred.GeneSpreadProb
+				item.Path = pred.SpreadPath
+			}
+			if item.Path == nil {
+				item.Path = make([]uint32, 0)
+			}
+			heatmap = append(heatmap, item)
+		}
+	}
+
+	c.JSON(200, heatmap)
+}
+
+func SubmitCultureResult(c *gin.Context) {
+	bedID, err := strconv.Atoi(c.Param("id"))
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid bed id"})
+		return
+	}
+
+	var cr models.CultureResult
+	if err := c.ShouldBindJSON(&cr); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+	cr.BedID = uint32(bedID)
+	if cr.Time.IsZero() {
+		cr.Time = time.Now()
+	}
+
+	_, err = database.DB.Exec(context.Background(),
+		`INSERT INTO culture_results (bed_id, bacteria_name, resistance_genes, antibiotic_sensitivity, time)
+		 VALUES ($1, $2, $3, $4, $5)`,
+		cr.BedID, cr.BacteriaName, cr.ResistanceGenes, cr.AntibioticSensitivity, cr.Time)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	if gnn_resistance.Instance != nil {
+		gnn_resistance.Instance.UpdateCultureResult(cr)
+	}
+
+	c.JSON(200, gin.H{"status": "ok"})
+}
+
+func GetLatestOptimizerSolution(c *gin.Context) {
+	if optimizer.Instance == nil {
+		c.JSON(503, gin.H{"error": "调度优化模块未启用"})
+		return
+	}
+	solution := optimizer.Instance.GetLatestSolution()
+	if solution == nil {
+		c.JSON(404, gin.H{"error": "暂无调度方案"})
+		return
+	}
+	c.JSON(200, solution)
+}
+
+func GetOptimizerSuggestions(c *gin.Context) {
+	if optimizer.Instance == nil {
+		c.JSON(503, gin.H{"error": "调度优化模块未启用"})
+		return
+	}
+	suggestions := optimizer.Instance.GetSuggestions()
+	c.JSON(200, suggestions)
+}
+
+func TriggerOptimizerSolve(c *gin.Context) {
+	if optimizer.Instance == nil {
+		c.JSON(503, gin.H{"error": "调度优化模块未启用"})
+		return
+	}
+
+	go optimizer.Instance.SolveAndBroadcast()
+
+	c.JSON(200, gin.H{"status": "triggered"})
+}
+
+func GetAllTransportResults(c *gin.Context) {
+	if transport_rf.Instance == nil {
+		c.JSON(503, gin.H{"error": "转运风险模块未启用"})
+		return
+	}
+	results := transport_rf.Instance.GetAllResults()
+	c.JSON(200, results)
+}
+
+func GetTransportResult(c *gin.Context) {
+	idStr := c.Param("id")
+	requestID, err := strconv.ParseUint(idStr, 10, 32)
+	if err != nil {
+		c.JSON(400, gin.H{"error": "invalid request id"})
+		return
+	}
+
+	if transport_rf.Instance != nil {
+		result := transport_rf.Instance.GetResult(uint32(requestID))
+		if result != nil {
+			c.JSON(200, result)
+			return
+		}
+	}
+
+	var r models.TransportRiskResult
+	var featureContribJSON []byte
+	err = database.DB.QueryRow(context.Background(),
+		`SELECT id, request_id, risk_score, risk_level, adverse_event_prob, feature_contrib, recommendations, time
+		 FROM transport_risk_results WHERE request_id = $1 ORDER BY time DESC LIMIT 1`, requestID).Scan(
+		&r.ID, &r.RequestID, &r.RiskScore, &r.RiskLevel, &r.AdverseEventProb,
+		&featureContribJSON, &r.Recommendations, &r.Time)
+	if err != nil {
+		c.JSON(404, gin.H{"error": "转运评估结果不存在"})
+		return
+	}
+
+	if len(featureContribJSON) > 0 {
+		_ = json.Unmarshal(featureContribJSON, &r.FeatureContrib)
+	}
+	if r.FeatureContrib == nil {
+		r.FeatureContrib = make(map[string]float64)
+	}
+	if r.Recommendations == nil {
+		r.Recommendations = make([]string, 0)
+	}
+
+	c.JSON(200, r)
+}
+
+func EvaluateTransport(c *gin.Context) {
+	var req models.TransportRequest
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(400, gin.H{"error": err.Error()})
+		return
+	}
+
+	if transport_rf.Instance == nil {
+		c.JSON(503, gin.H{"error": "转运风险模块未启用"})
+		return
+	}
+
+	result, err := transport_rf.Instance.ScoreRequest(req)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	featureContribJSON, _ := json.Marshal(result.FeatureContrib)
+	_, err = database.DB.Exec(context.Background(),
+		`INSERT INTO transport_risk_results (request_id, risk_score, risk_level, adverse_event_prob, feature_contrib, recommendations, time)
+		 VALUES ($1, $2, $3, $4, $5, $6, $7)`,
+		result.RequestID, result.RiskScore, result.RiskLevel, result.AdverseEventProb,
+		featureContribJSON, result.Recommendations, result.Time)
+	if err != nil {
+		c.JSON(500, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(200, result)
 }
