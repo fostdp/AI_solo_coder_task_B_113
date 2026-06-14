@@ -629,3 +629,104 @@ body {
     0%, 100% { opacity: 1; }
     50% { opacity: 0.5; }
 }
+
+.tab-content .risk-bar {
+    display: flex;
+    height: 20px;
+    background: #f3f4f6;
+    border-radius: 4px;
+    overflow: hidden;
+}
+
+.risk-bar-fill {
+    transition: width 0.3s;
+}
+
+.suggestion-card {
+    padding: 10px;
+    margin-bottom: 8px;
+    border-left: 4px solid;
+    border-radius: 4px;
+}
+
+.suggestion-high {
+    border-left-color: #ef4444;
+}
+
+.suggestion-medium {
+    border-left-color: #f59e0b;
+}
+
+.suggestion-low {
+    border-left-color: #10b981;
+}
+
+.vap-header {
+    background: #0d1a30;
+    border-radius: 12px;
+    border: 1px solid #1e3a5f;
+    padding: 20px;
+    margin-bottom: 20px;
+}
+
+.vap-header h3 {
+    color: #fff;
+    margin-bottom: 8px;
+    font-size: 18px;
+}
+
+.vap-description {
+    color: #8b9bb4;
+    font-size: 13px;
+    line-height: 1.6;
+}
+
+.vap-content {
+    background: #0d1a30;
+    border-radius: 12px;
+    border: 1px solid #1e3a5f;
+    padding: 20px;
+}
+
+.vap-table-wrapper {
+    overflow-x: auto;
+    border-radius: 8px;
+    border: 1px solid #1e3a5f;
+}
+
+.data-table {
+    width: 100%;
+    border-collapse: collapse;
+    font-size: 13px;
+}
+
+.data-table thead {
+    background: rgba(59, 130, 246, 0.1);
+}
+
+.data-table th {
+    padding: 12px;
+    text-align: left;
+    color: #8b9bb4;
+    font-weight: 600;
+    font-size: 12px;
+    text-transform: uppercase;
+    letter-spacing: 0.5px;
+    border-bottom: 2px solid #2a4a7a;
+}
+
+.data-table tbody tr:hover {
+    background: rgba(59, 130, 246, 0.05);
+}
+
+.data-table tbody td {
+    color: #e0e6ed;
+}
+
+.risk-level-badge {
+    display: inline-block;
+    padding: 4px 12px;
+    border-radius: 12px;
+    font-size: 12px;
+    font-weight: 600;
+}
