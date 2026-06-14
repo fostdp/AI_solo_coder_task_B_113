@@ -117,6 +117,124 @@ services:
     networks:
       - field-hospital-net
 
+  # ============ VAP Cox gRPC Service ============
+  vap-cox-service:
+    build:
+      context: ./services/vap_cox
+      dockerfile: Dockerfile
+    container_name: field-hospital-vap-cox
+    ports:
+      - "50051:50051"
+      - "50052:50052"
+    environment:
+      - VAP_COX_RPC_PORT=50051
+      - VAP_COX_HEALTH_PORT=50052
+      - VAP_COX_TIMEOUT_SEC=2
+      - VAP_COX_POOL_SIZE=4
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:50052/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '2'
+          memory: 512M
+    networks:
+      - field-hospital-net
+
+  # ============ GNN Client gRPC Service ============
+  gnn-client-service:
+    build:
+      context: ./services/gnn_client
+      dockerfile: Dockerfile
+    container_name: field-hospital-gnn-client
+    ports:
+      - "50052:50052"
+    environment:
+      - GNN_CLIENT_PORT=50052
+      - GNN_PYTHON_URL=http://gnn-service:8000
+      - GNN_NUM_BEDS=50
+    depends_on:
+      gnn-service:
+        condition: service_healthy
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:50052/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+    networks:
+      - field-hospital-net
+
+  # ============ Scheduler Optimizer Service (CPU密集型) ============
+  scheduler-service:
+    build:
+      context: ./services/scheduler_optimizer
+      dockerfile: Dockerfile
+    container_name: field-hospital-scheduler
+    ports:
+      - "50053:50053"
+    environment:
+      - SCHEDULER_PORT=50053
+      - SCHEDULER_LAMBDA=0.5
+      - SCHEDULER_DEADLINE_MS=5000
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:50053/health"]
+      interval: 10s
+      timeout: 3s
+      retries: 3
+      start_period: 10s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '4'
+          memory: 1G
+        reservations:
+          cpus: '2'
+    labels:
+      - "compute.type=integer_programming"
+      - "compute.intensity=high"
+    networks:
+      - field-hospital-net
+
+  # ============ Transport RF Service ============
+  transport-service:
+    build:
+      context: ./services/transport_rf
+      dockerfile: Dockerfile
+    container_name: field-hospital-transport
+    ports:
+      - "50054:50054"
+    environment:
+      - TRANSPORT_PORT=50054
+      - FOREST_TREES=50
+      - FOREST_DEPTH=3
+    healthcheck:
+      test: ["CMD", "wget", "-qO-", "http://localhost:50054/health"]
+      interval: 10s
+      timeout: 2s
+      retries: 3
+      start_period: 5s
+    restart: unless-stopped
+    deploy:
+      resources:
+        limits:
+          cpus: '1'
+          memory: 256M
+    networks:
+      - field-hospital-net
+
   backend:
     build:
       context: ./backend
@@ -138,6 +256,10 @@ services:
       COX_VAP_ENABLED: "true"
       OPTIMIZER_ENABLED: "true"
       TRANSPORT_ENABLED: "true"
+      VAP_COX_SERVICE: vap-cox-service:50051
+      GNN_CLIENT_SERVICE: gnn-client-service:50052
+      SCHEDULER_SERVICE: scheduler-service:50053
+      TRANSPORT_SERVICE: transport-service:50054
     ports:
       - "8080:8080"
       - "6060:6060"
@@ -147,6 +269,14 @@ services:
       emqx:
         condition: service_healthy
       gnn-service:
+        condition: service_healthy
+      vap-cox-service:
+        condition: service_healthy
+      gnn-client-service:
+        condition: service_healthy
+      scheduler-service:
+        condition: service_healthy
+      transport-service:
         condition: service_healthy
     healthcheck:
       test: ["CMD-SHELL", "curl -f http://localhost:8080/api/beds || exit 1"]
