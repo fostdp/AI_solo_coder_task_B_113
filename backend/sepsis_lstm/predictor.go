@@ -716,6 +716,20 @@ func sigmoid(x float64) float64 {
 	return 1.0 / (1.0 + math.Exp(-x))
 }
 
+func (p *Predictor) GetVitalStabilityScore(bedID uint32) float64 {
+	pred := p.RunPrediction(int(bedID))
+	stableScore := 100.0 - pred.Probability*100.0
+	sofaPenalty := float64(pred.SOFAScore) * 3.0
+	score := stableScore - sofaPenalty
+	if score < 0 {
+		score = 0
+	}
+	if score > 100 {
+		score = 100
+	}
+	return score
+}
+
 func tanh(x float64) float64 {
 	return math.Tanh(x)
 }
