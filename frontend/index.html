@@ -1,0 +1,211 @@
+<!DOCTYPE html>
+<html lang="zh-CN">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>战地医院移动ICU监测系统</title>
+    <script src="https://cdn.jsdelivr.net/npm/echarts@5.4.3/dist/echarts.min.js"></script>
+    <link rel="stylesheet" href="css/style.css">
+</head>
+<body>
+    <div id="app">
+        <header class="main-header">
+            <div class="header-left">
+                <h1>🏥 战地医院移动ICU监测系统</h1>
+                <span class="status-badge" id="connectionStatus">● 连接中...</span>
+            </div>
+            <div class="header-right">
+                <div class="stat-box">
+                    <span class="stat-label">总床位</span>
+                    <span class="stat-value" id="totalBeds">50</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">在院</span>
+                    <span class="stat-value" id="occupiedBeds">0</span>
+                </div>
+                <div class="stat-box warning">
+                    <span class="stat-label">活动告警</span>
+                    <span class="stat-value" id="activeAlerts">0</span>
+                </div>
+                <div class="stat-box danger">
+                    <span class="stat-label">脓毒症高风险</span>
+                    <span class="stat-value" id="highRiskSepsis">0</span>
+                </div>
+                <div class="stat-box danger">
+                    <span class="stat-label">感染高风险</span>
+                    <span class="stat-value" id="highRiskInfection">0</span>
+                </div>
+                <div class="stat-box">
+                    <span class="stat-label">平均SOFA</span>
+                    <span class="stat-value" id="avgSOFA">0.0</span>
+                </div>
+                <span class="current-time" id="currentTime"></span>
+            </div>
+        </header>
+
+        <nav class="tab-nav">
+            <button class="tab-btn active" data-tab="layout">床位布局</button>
+            <button class="tab-btn" data-tab="vitals">实时监护</button>
+            <button class="tab-btn" data-tab="heatmap">感染热力图</button>
+            <button class="tab-btn" data-tab="alerts">告警中心</button>
+        </nav>
+
+        <main class="main-content">
+            <section class="tab-content active" id="tab-layout">
+                <div class="layout-container">
+                    <div class="canvas-wrapper">
+                        <div id="bedChartContainer" style="width:100%;height:620px;"></div>
+                    </div>
+                    <aside class="bed-detail-panel" id="bedDetailPanel">
+                        <div class="panel-empty" id="panelEmpty">
+                            <p>点击左侧床位查看详情</p>
+                        </div>
+                        <div class="panel-content" id="panelContent" style="display:none;">
+                            <div class="patient-header">
+                                <h2 id="detailBedCode">ICU-001</h2>
+                                <span class="patient-info">
+                                    <span id="detailPatientName">患者</span>
+                                    <span id="detailPatientAge">0</span>岁
+                                    <span id="detailPatientGender">男</span>
+                                </span>
+                            </div>
+                            <div class="risk-indicators">
+                                <div class="risk-item">
+                                    <span class="risk-label">SOFA评分</span>
+                                    <span class="risk-value" id="detailSOFA">0</span>
+                                </div>
+                                <div class="risk-item sepsis">
+                                    <span class="risk-label">脓毒症概率</span>
+                                    <span class="risk-value" id="detailSepsis">0%</span>
+                                </div>
+                                <div class="risk-item cre">
+                                    <span class="risk-label">CRE风险</span>
+                                    <span class="risk-value" id="detailCRE">0%</span>
+                                </div>
+                                <div class="risk-item mrsa">
+                                    <span class="risk-label">MRSA风险</span>
+                                    <span class="risk-value" id="detailMRSA">0%</span>
+                                </div>
+                            </div>
+                            <div class="vital-signs-grid">
+                                <div class="vital-card ecg">
+                                    <div class="vital-icon">❤️</div>
+                                    <div class="vital-info">
+                                        <span class="vital-label">心率(ECG)</span>
+                                        <span class="vital-value"><span id="vitalECG">--</span> <small>bpm</small></span>
+                                    </div>
+                                </div>
+                                <div class="vital-card vent">
+                                    <div class="vital-icon">💨</div>
+                                    <div class="vital-info">
+                                        <span class="vital-label">呼吸频率</span>
+                                        <span class="vital-value"><span id="vitalVent">--</span> <small>rpm</small></span>
+                                    </div>
+                                </div>
+                                <div class="vital-card spo2">
+                                    <div class="vital-icon">🩸</div>
+                                    <div class="vital-info">
+                                        <span class="vital-label">血氧饱和度</span>
+                                        <span class="vital-value"><span id="vitalSpO2">--</span> <small>%</small></span>
+                                    </div>
+                                </div>
+                                <div class="vital-card temp">
+                                    <div class="vital-icon">🌡️</div>
+                                    <div class="vital-info">
+                                        <span class="vital-label">体温</span>
+                                        <span class="vital-value"><span id="vitalTemp">--</span> <small>°C</small></span>
+                                    </div>
+                                </div>
+                            </div>
+                            <div class="mini-chart" id="miniChart" style="height:180px;"></div>
+                            <div class="action-buttons">
+                                <button class="btn btn-primary" onclick="showDetailVitals()">查看完整曲线</button>
+                                <button class="btn btn-warning" onclick="recordProcedure()">记录侵入操作</button>
+                                <button class="btn btn-danger" onclick="recordAntibiotic()">记录抗生素</button>
+                            </div>
+                        </div>
+                    </aside>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-vitals">
+                <div class="vitals-container">
+                    <div class="vitals-toolbar">
+                        <label>
+                            选择床位:
+                            <select id="bedSelect">
+                                <option value="">-- 请选择 --</option>
+                            </select>
+                        </label>
+                        <label>
+                            时间范围:
+                            <select id="timeRange">
+                                <option value="60">最近1分钟</option>
+                                <option value="300" selected>最近5分钟</option>
+                                <option value="900">最近15分钟</option>
+                                <option value="3600">最近1小时</option>
+                            </select>
+                        </label>
+                    </div>
+                    <div class="charts-grid">
+                        <div class="chart-card">
+                            <div class="chart-title">❤️ 心率趋势 (ECG)</div>
+                            <div id="chartECG" class="chart-box"></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-title">💨 呼吸频率趋势</div>
+                            <div id="chartVent" class="chart-box"></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-title">🩸 血氧饱和度趋势 (SpO2)</div>
+                            <div id="chartSpO2" class="chart-box"></div>
+                        </div>
+                        <div class="chart-card">
+                            <div class="chart-title">🌡️ 体温趋势</div>
+                            <div id="chartTemp" class="chart-box"></div>
+                        </div>
+                    </div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-heatmap">
+                <div class="heatmap-container">
+                    <div class="heatmap-toolbar">
+                        <h3>院内感染风险热力图 (CRE + MRSA)</h3>
+                        <div class="heatmap-legend">
+                            <span>低风险</span>
+                            <div class="legend-gradient"></div>
+                            <span>高风险</span>
+                        </div>
+                    </div>
+                    <div id="heatmapChart" style="width:100%;height:650px;"></div>
+                </div>
+            </section>
+
+            <section class="tab-content" id="tab-alerts">
+                <div class="alerts-container">
+                    <div class="alerts-toolbar">
+                        <h3>告警中心</h3>
+                        <div class="alerts-filter">
+                            <button class="filter-btn active" data-filter="all">全部</button>
+                            <button class="filter-btn" data-filter="sepsis">脓毒症</button>
+                            <button class="filter-btn" data-filter="cre_infection">CRE感染</button>
+                            <button class="filter-btn" data-filter="mrsa_infection">MRSA感染</button>
+                            <button class="filter-btn" data-filter="unack">未确认</button>
+                        </div>
+                    </div>
+                    <div class="alerts-list" id="alertsList">
+                        <div class="alerts-empty">暂无告警</div>
+                    </div>
+                </div>
+            </section>
+        </main>
+    </div>
+
+    <div id="alertToast" class="alert-toast hidden"></div>
+
+    <script src="js/BedChart.js"></script>
+    <script src="js/RiskHeatmap.js"></script>
+    <script src="js/app.js"></script>
+</body>
+</html>
